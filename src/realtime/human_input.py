@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import numpy as np
-from typing import Literal, Generator
+from typing import Literal, Generator, Callable
 
 from livekit import rtc
 
@@ -19,20 +19,87 @@ EventTypes = Literal[
 
 
 class AudioBuffer:
-    def __init__(self):
+    def __init__(self, max_seconds: float = 30.0):
         self.buffer = []
-        self.sample_rate = 16000  # Standard sample rate
+        self.sample_rate = 16000
+        self.max_samples = int(max_seconds * self.sample_rate)
 
-    def add_frame(self, frame):
-        self.buffer.extend(frame.data)
+    def add_frame(self, frame) -> bool:
+        """Returns False if buffer is full"""
+        if len(self.buffer) >= self.max_samples:
+            return False
+
+        # Convert and normalize frame data
+        frame_data = np.array(frame.data, dtype=np.float32)
+        frame_data = np.clip(frame_data, -1.0, 1.0)
+        self.buffer.extend(frame_data)
+        return True
 
     def get_audio(self) -> np.ndarray:
         if not self.buffer:
-            return np.array([])
+            return np.array([], dtype=np.float32)
         return np.array(self.buffer, dtype=np.float32)
 
     def clear(self):
-        self.buffer = []
+        self.buffer.clear()
+
+    def __len__(self):
+        return len(self.buffer)
+
+
+async def process_model_output(
+    model_fn: Callable[[np.ndarray], Generator[str, None, None]],
+    audio_data: np.ndarray,
+    emit_fn: Callable,
+    timeout: float = 30.0,
+) -> None:
+    """Process model output with timeout and error handling"""
+    try:
+        loop = asyncio.get_event_loop()
+        generator = await asyncio.wait_for(loop.run_in_executor(None, model_fn, audio_data), timeout=timeout)
+
+        accumulated_text = ""
+        for text in generator:
+            if text:
+                accumulated_text += text
+                # Emit interim results
+                emit_fn(
+                    "interim_response",
+                    type(
+                        "SpeechEvent",
+                        (),
+                        {
+                            "type": "interim_response",
+                            "alternatives": [
+                                type(
+                                    "Alternative",
+                                    (),
+                                    {"text": accumulated_text, "language": "en"},
+                                )
+                            ],
+                        },
+                    ),
+                )
+
+        if accumulated_text:
+            emit_fn(
+                "final_response",
+                type(
+                    "SpeechEvent",
+                    (),
+                    {
+                        "type": "final_response",
+                        "alternatives": [type("Alternative", (), {"text": accumulated_text, "language": "en"})],
+                    },
+                ),
+            )
+
+    except asyncio.TimeoutError:
+        logger.error("Model processing timed out")
+        # Emit error event if needed
+    except Exception as e:
+        logger.error(f"Error processing model output: {str(e)}")
+        # Emit error event if needed
 
 
 class HumanInput(utils.EventEmitter[EventTypes]):
@@ -43,7 +110,7 @@ class HumanInput(utils.EventEmitter[EventTypes]):
         vad: voice_activity_detection.VAD,
         participant: rtc.RemoteParticipant,
         transcription: bool,
-        model_fn: callable,  # The gen_from_model function
+        model_fn: Callable[[np.ndarray], Generator[str, None, None]],
     ) -> None:
         super().__init__()
         self._room = room
@@ -130,13 +197,15 @@ class HumanInput(utils.EventEmitter[EventTypes]):
             async for ev in audio_stream:
                 vad_stream.push_frame(ev.frame)
                 if self._speaking:
-                    self._audio_buffer.add_frame(ev.frame)
+                    if not self._audio_buffer.add_frame(ev.frame):
+                        logger.warning("Audio buffer full, stopping recording")
+                        self._speaking = False
 
         async def _vad_stream_co() -> None:
             async for ev in vad_stream:
                 if ev.type == voice_activity_detection.VADEventType.START_OF_SPEECH:
                     self._speaking = True
-                    self._audio_buffer.clear()  # Clear buffer for new utterance
+                    self._audio_buffer.clear()
                     self.emit("start_of_speech", ev)
                 elif ev.type == voice_activity_detection.VADEventType.INFERENCE_DONE:
                     self._speech_probability = ev.probability
@@ -148,49 +217,7 @@ class HumanInput(utils.EventEmitter[EventTypes]):
                     # Process the complete utterance
                     audio_data = self._audio_buffer.get_audio()
                     if len(audio_data) > 0:
-                        # Run the model in a separate thread to avoid blocking
-                        loop = asyncio.get_event_loop()
-                        generator = await loop.run_in_executor(None, self._model_fn, audio_data)
-
-                        # Process the generator results
-                        accumulated_text = ""
-                        for text in generator:
-                            if text:
-                                accumulated_text += text
-                                # Emit interim results
-                                self.emit(
-                                    "interim_response",
-                                    type(
-                                        "SpeechEvent",
-                                        (),
-                                        {
-                                            "type": "interim_response",
-                                            "alternatives": [
-                                                type(
-                                                    "Alternative",
-                                                    (),
-                                                    {"text": accumulated_text, "language": "en"},  # Default to English
-                                                )
-                                            ],
-                                        },
-                                    ),
-                                )
-
-                        # Emit final transcript
-                        if accumulated_text:
-                            self.emit(
-                                "final_transcript",
-                                type(
-                                    "SpeechEvent",
-                                    (),
-                                    {
-                                        "type": "final_response",
-                                        "alternatives": [
-                                            type("Alternative", (), {"text": accumulated_text, "language": "en"})
-                                        ],
-                                    },
-                                ),
-                            )
+                        await process_model_output(self._model_fn, audio_data, self.emit)
 
         tasks = [
             asyncio.create_task(_audio_stream_co()),
