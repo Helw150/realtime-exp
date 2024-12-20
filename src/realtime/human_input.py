@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import numpy as np
-from typing import Literal, Generator, Callable
+from typing import Literal, Callable
 
 from livekit import rtc
 
@@ -48,7 +48,7 @@ class AudioBuffer:
 
 
 async def process_model_output(
-    model_fn: Callable[[np.ndarray], Generator[str, None, None]],
+    model_fn: Callable[[np.ndarray, List[ChatMessage]], AsyncIterable[str]],
     audio_data: np.ndarray,
     emit_fn: Callable,
     timeout: float = 30.0,
@@ -110,7 +110,7 @@ class HumanInput(utils.EventEmitter[EventTypes]):
         vad: voice_activity_detection.VAD,
         participant: rtc.RemoteParticipant,
         transcription: bool,
-        model_fn: Callable[[np.ndarray], Generator[str, None, None]],
+        model_fn: Callable[[np.ndarray, List[ChatMessage]], AsyncIterable[str]],
     ) -> None:
         super().__init__()
         self._room = room
@@ -181,18 +181,6 @@ class HumanInput(utils.EventEmitter[EventTypes]):
         """
         vad_stream = self._vad.stream()
 
-        def _before_forward(fwd: transcription.STTSegmentsForwarder, transcription: rtc.Transcription):
-            if not self._transcription:
-                transcription.segments = []
-            return transcription
-
-        stt_forwarder = transcription.STTSegmentsForwarder(
-            room=self._room,
-            participant=self._participant,
-            track=self._subscribed_track,
-            before_forward_cb=_before_forward,
-        )
-
         async def _audio_stream_co() -> None:
             async for ev in audio_stream:
                 vad_stream.push_frame(ev.frame)
@@ -227,5 +215,4 @@ class HumanInput(utils.EventEmitter[EventTypes]):
             await asyncio.gather(*tasks)
         finally:
             await utils.aio.gracefully_cancel(*tasks)
-            await stt_forwarder.aclose()
             await vad_stream.aclose()

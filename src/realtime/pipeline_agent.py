@@ -4,7 +4,7 @@ import asyncio
 import contextvars
 import time
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, AsyncIterable, Callable, Literal, Optional, List, Union, Generator
+from typing import Any, AsyncGenerator, AsyncIterable, Callable, Literal, Optional, List, Union
 
 import numpy as np
 from livekit import rtc
@@ -111,7 +111,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         self,
         *,
         vad: vad.VAD,
-        model_fn: Callable[[np.ndarray, List[ChatMessage]], Generator[str, None, None]],
+        model_fn: Callable[[np.ndarray, List[ChatMessage]], AsyncIterable[str]],
         tts: tts.TTS,
         turn_detector: _TurnDetector | None = None,
         chat_ctx: ChatContext | None = None,
@@ -179,16 +179,8 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         return self._chat_ctx
 
     @property
-    def llm(self) -> LLM:
-        return self._llm
-
-    @property
     def tts(self) -> tts.TTS:
         return self._tts
-
-    @property
-    def stt(self) -> stt.STT:
-        return self._stt
 
     @property
     def vad(self) -> vad.VAD:
@@ -205,15 +197,6 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         if self._started:
             raise RuntimeError("voice assistant already started")
 
-        @self._stt.on("metrics_collected")
-        def _on_stt_metrics(stt_metrics: metrics.STTMetrics) -> None:
-            self.emit(
-                "metrics_collected",
-                metrics.PipelineSTTMetrics(
-                    **stt_metrics.__dict__,
-                ),
-            )
-
         @self._tts.on("metrics_collected")
         def _on_tts_metrics(tts_metrics: metrics.TTSMetrics) -> None:
             speech_data = SpeechDataContextVar.get(None)
@@ -224,19 +207,6 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                 "metrics_collected",
                 metrics.PipelineTTSMetrics(
                     **tts_metrics.__dict__,
-                    sequence_id=speech_data.sequence_id,
-                ),
-            )
-
-        @self._llm.on("metrics_collected")
-        def _on_llm_metrics(llm_metrics: metrics.LLMMetrics) -> None:
-            speech_data = SpeechDataContextVar.get(None)
-            if speech_data is None:
-                return
-            self.emit(
-                "metrics_collected",
-                metrics.PipelineLLMMetrics(
-                    **llm_metrics.__dict__,
                     sequence_id=speech_data.sequence_id,
                 ),
             )
