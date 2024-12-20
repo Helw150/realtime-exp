@@ -1,18 +1,27 @@
+# agent.py
 import asyncio
 import logging
 import os
 
 from dotenv import load_dotenv
 from livekit import rtc
-from livekit.agents import AutoSubscribe, JobContext, JobProcess, WorkerOptions, cli, llm, metrics
+from livekit.agents import AutoSubscribe, JobContext, JobProcess, WorkerOptions, cli
 from livekit.plugins import cartesia, silero
 
-from realtime.diva import DiVA
-
+from realtime.vllm import VLLM, VLLMConfig
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+MODEL_CONFIGS = {
+    "diva": VLLMConfig(
+        model_id="WillHeld/DiVA-llama-3-v0-8b",
+        base_url="https://ov228wydp5d4u7-40021.proxy.runpod.net/v1",
+        prompt="You are DiVA, a voice assistant. Keep responses under 20 words.",
+    ),
+}
 
 
 def prewarm(proc: JobProcess):
@@ -20,29 +29,23 @@ def prewarm(proc: JobProcess):
 
 
 async def entrypoint(ctx: JobContext):
-    # Initialize chat context
-    initial_ctx = llm.ChatContext().append(
-        role="system",
-        text=(
-            "Your name is DiVA, which stands for Distilled Voice Assistant. "
-            "You were trained with early-fusion training to merge OpenAI's Whisper and Meta AI's Llama 3 8B "
-            "to provide end-to-end voice processing. Keep responses concise and under 20 words."
-        ),
-    )
-
     logger.info(f"connecting to room {ctx.room.name}")
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
     # Wait for first participant
     participant = await ctx.wait_for_participant()
-    logger.info(f"starting DiVA for participant {participant.identity}")
+
+    # Get model config from environment or default to DiVA
+    model_name = os.getenv("VLLM_MODEL", "diva")
+    model_config = MODEL_CONFIGS[model_name]
+    logger.info(f"starting {model_name} for participant {participant.identity}")
 
     # Initialize TTS
-    tts = cartesia.TTS(model_name="ee7ea9f8-c0c1-498c-9279-764d6b56d189", sample_rate=24000)
+    tts = cartesia.TTS(voice="ee7ea9f8-c0c1-498c-9279-764d6b56d189")
     audio_source = rtc.AudioSource(24000, 1)
 
     # Create and publish audio track
-    track = rtc.LocalAudioTrack.create_audio_track("diva-voice", audio_source)
+    track = rtc.LocalAudioTrack.create_audio_track("vllm-voice", audio_source)
     await ctx.room.local_participant.publish_track(track)
 
     async def synthesize_speech(text: str):
@@ -54,33 +57,22 @@ async def entrypoint(ctx: JobContext):
 
         await stream.aclose()
 
-    # Initialize DiVA
-    diva = DiVA(
-        ctx=ctx, vad=ctx.proc.userdata["vad"], on_response=lambda text: ctx.create_task(synthesize_speech(text))
+    # Initialize VLLM
+    vllm = VLLM(
+        ctx=ctx,
+        vad=ctx.proc.userdata["vad"],
+        on_response=lambda text: asyncio.create_task(synthesize_speech(text)),
+        config=model_config,
     )
 
-    # Start DiVA
-    await diva.start()
-
-    # Set up metrics collection
-    usage_collector = metrics.UsageCollector()
-
-    @diva.on("metrics_collected")
-    def _on_metrics_collected(mtrcs: metrics.AgentMetrics):
-        metrics.log_metrics(mtrcs)
-        usage_collector.collect(mtrcs)
-
-    async def log_usage():
-        summary = usage_collector.get_summary()
-        logger.info(f"Usage: ${summary}")
-
-    ctx.add_shutdown_callback(log_usage)
+    # Start VLLM
+    await vllm.start()
 
     # Handle text chat
     chat = rtc.ChatManager(ctx.room)
 
     async def answer_from_text(txt: str):
-        response = await diva.generate_text_response(txt)
+        response = await vllm.generate_text_response(txt)
         await chat.send_message(response)
         await synthesize_speech(response)
 
