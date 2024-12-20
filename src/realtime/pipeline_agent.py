@@ -194,9 +194,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
     def vad(self) -> vad.VAD:
         return self._vad
 
-    def start(
-        self, room: rtc.Room, participant: rtc.RemoteParticipant | str | None = None
-    ) -> None:
+    def start(self, room: rtc.Room, participant: rtc.RemoteParticipant | str | None = None) -> None:
         """Start the voice assistant
 
         Args:
@@ -245,9 +243,9 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
 
         @self._vad.on("metrics_collected")
         def _on_vad_metrics(vad_metrics: vad.VADMetrics) -> None:
-            self.emit(
-                "metrics_collected", metrics.PipelineVADMetrics(**vad_metrics.__dict__)
-            )
+            self.emit("metrics_collected", metrics.PipelineVADMetrics(**vad_metrics.__dict__))
+
+        self._started = True
 
         room.on("participant_connected", self._on_participant_connected)
         self._room = room
@@ -316,9 +314,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                 pass
             else:
                 if isinstance(source, LLMStream):
-                    logger.warning(
-                        "LLMStream will be ignored for function call chat context"
-                    )
+                    logger.warning("LLMStream will be ignored for function call chat context")
                 elif isinstance(source, AsyncIterable):
                     source, fnc_source = utils.aio.itertools.tee(source, 2)  # type: ignore
                 else:
@@ -344,9 +340,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             else:
                 text = fnc_source
 
-            call_ctx.add_extra_chat_message(
-                ChatMessage.create(text=text, role="assistant")
-            )
+            call_ctx.add_extra_chat_message(ChatMessage.create(text=text, role="assistant"))
             logger.debug(
                 "added speech to function call chat context",
                 extra={"text": text},
@@ -362,9 +356,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             await asyncio.sleep(delay)
 
             if self._room.isconnected():
-                await self._room.local_participant.set_attributes(
-                    {ATTRIBUTE_AGENT_STATE: state}
-                )
+                await self._room.local_participant.set_attributes({ATTRIBUTE_AGENT_STATE: state})
 
         if self._update_state_task is not None:
             self._update_state_task.cancel()
