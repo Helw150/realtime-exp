@@ -355,10 +355,11 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
 
         self._human_input = HumanInput(
             room=self._room,
+            chat_ctx=self._chat_ctx,
             vad=self._vad,
             participant=participant,
             transcription=self._opts.transcription.user_transcription,
-            model_fn=lambda audio: self._model_fn(audio, self._chat_ctx.messages),
+            model_fn=self.model_fn,
         )
 
         def _on_start_of_speech(ev: vad.VADEvent) -> None:

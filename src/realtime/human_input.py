@@ -20,9 +20,11 @@ EventTypes = Literal[
 
 class AudioBuffer:
     def __init__(self, max_seconds: float = 30.0):
-        self.buffer = []
+        # Pre-allocate for better performance
         self.sample_rate = 16000
-        self.max_samples = int(max_seconds * self.sample_rate)
+        self.max_samples = int(max_seconds * self.sample_rate)  # 16kHz sampling
+        self.buffer = np.zeros(self.max_samples, dtype=np.float32)
+        self.current_size = 0
 
     def add_frame(self, frame) -> bool:
         """Returns False if buffer is full"""
@@ -55,12 +57,10 @@ async def process_model_output(
 ) -> None:
     """Process model output with timeout and error handling"""
     try:
-        loop = asyncio.get_event_loop()
-        generator = await asyncio.wait_for(loop.run_in_executor(None, model_fn, audio_data), timeout=timeout)
-
         accumulated_text = ""
-        for text in generator:
+        async for text in model_fn(audio_data, self._chat_ctx.messages):
             if text:
+                accumulated_text += text
                 accumulated_text += text
                 # Emit interim results
                 emit_fn(
@@ -107,6 +107,7 @@ class HumanInput(utils.EventEmitter[EventTypes]):
         self,
         *,
         room: rtc.Room,
+        chat_ctx: ChatContext,
         vad: voice_activity_detection.VAD,
         participant: rtc.RemoteParticipant,
         transcription: bool,
@@ -114,6 +115,7 @@ class HumanInput(utils.EventEmitter[EventTypes]):
     ) -> None:
         super().__init__()
         self._room = room
+        self._chat_ctx = chat_ctx
         self._vad = vad
         self._participant = participant
         self._transcription = transcription
