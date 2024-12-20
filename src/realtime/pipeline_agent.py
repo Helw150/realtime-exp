@@ -18,6 +18,8 @@ from .log import logger
 from .plotter import AssistantPlotter
 from .speech_handle import SpeechHandle
 
+SpeechDataContextVar = contextvars.ContextVar[SpeechData]("voice_assistant_speech_data")
+
 
 @dataclass
 class ChatMessage:
@@ -359,7 +361,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             vad=self._vad,
             participant=participant,
             transcription=self._opts.transcription.user_transcription,
-            model_fn=self.model_fn,
+            model_fn=self._model_fn,
         )
 
         def _on_start_of_speech(ev: vad.VADEvent) -> None:

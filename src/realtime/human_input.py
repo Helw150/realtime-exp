@@ -20,33 +20,39 @@ EventTypes = Literal[
 
 class AudioBuffer:
     def __init__(self, max_seconds: float = 30.0):
-        # Pre-allocate for better performance
-        self.sample_rate = 16000
-        self.max_samples = int(max_seconds * self.sample_rate)  # 16kHz sampling
+        self.sample_rate = 16000  # 16kHz sampling
+        self.max_samples = int(max_seconds * self.sample_rate)
         self.buffer = np.zeros(self.max_samples, dtype=np.float32)
         self.current_size = 0
 
     def add_frame(self, frame) -> bool:
-        """Returns False if buffer is full"""
-        if len(self.buffer) >= self.max_samples:
-            return False
-
-        # Convert and normalize frame data
+        """
+        Add a new audio frame to the buffer.
+        Returns False if buffer would overflow, True if frame was added successfully.
+        """
         frame_data = np.array(frame.data, dtype=np.float32)
         frame_data = np.clip(frame_data, -1.0, 1.0)
-        self.buffer.extend(frame_data)
+
+        # Check if we have enough space
+        if self.current_size + len(frame_data) > self.max_samples:
+            return False
+
+        # Copy the new data into the buffer
+        self.buffer[self.current_size : self.current_size + len(frame_data)] = frame_data
+        self.current_size += len(frame_data)
         return True
 
     def get_audio(self) -> np.ndarray:
-        if not self.buffer:
-            return np.array([], dtype=np.float32)
-        return np.array(self.buffer, dtype=np.float32)
+        """Return the currently buffered audio"""
+        return self.buffer[: self.current_size].copy()
 
     def clear(self):
-        self.buffer.clear()
+        """Reset the buffer to empty"""
+        self.current_size = 0
+        # No need to actually zero the buffer, we'll just overwrite it
 
     def __len__(self):
-        return len(self.buffer)
+        return self.current_size
 
 
 async def process_model_output(
@@ -60,7 +66,6 @@ async def process_model_output(
         accumulated_text = ""
         async for text in model_fn(audio_data, self._chat_ctx.messages):
             if text:
-                accumulated_text += text
                 accumulated_text += text
                 # Emit interim results
                 emit_fn(
