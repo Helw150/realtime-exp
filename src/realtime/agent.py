@@ -1,15 +1,14 @@
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from dotenv import load_dotenv
 from livekit import agents, rtc
-from livekit.agents.tts import SynthesisEvent
 from livekit.plugins.cartesia import TTS
 
 from realtime.diva import DiVA
-
 
 # Setup
 load_dotenv()
@@ -41,8 +40,8 @@ class TTSManager:
         stream.push_text(text)
 
         async for event in stream:
-            if event.type == SynthesisEvent.AUDIO:
-                await self.audio_out.capture_frame(event.audio.data)
+            # TTS stream directly provides audio data
+            await self.audio_out.capture_frame(event.data)
 
         await stream.aclose()
 
@@ -79,21 +78,45 @@ async def run_diva(ctx: agents.JobContext):
         logger.error(f"Error in DiVA agent: {e}")
 
 
-def main():
-    """Main entry point"""
+async def handle_job_request(job_request: agents.JobRequest):
+    """Handle incoming job requests"""
+    logger.info("Accepting job request")
+    await job_request.accept(
+        run_diva,
+        identity="diva_agent",
+        name="DiVA",
+        auto_subscribe=agents.AutoSubscribe.AUDIO_ONLY,
+    )
 
-    async def handle_job(job_request: agents.JobRequest):
-        logger.info("Accepting job request")
-        await job_request.accept(
-            run_diva,
-            identity="diva_agent",
-            name="DiVA",
-            auto_subscribe=agents.AutoSubscribe.AUDIO_ONLY,
+
+async def main():
+    """Main entry point"""
+    # Get credentials from environment variables
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    ws_url = os.getenv("LIVEKIT_URL")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+
+    if not all([api_key, ws_url, api_secret]):
+        raise ValueError(
+            "LIVEKIT_API_KEY, LIVEKIT_WS_URL, and LIVEKIT_API_SECRET must be set in environment variables"
         )
 
-    worker = agents.Worker(request_handler=handle_job)
-    agents.run_app(worker)
+    worker_opts = agents.WorkerOptions(
+        entrypoint_fnc=handle_job_request,
+        ws_url=ws_url,
+        api_key=api_key,
+        api_secret=api_secret,
+    )
+    worker = agents.Worker(opts=worker_opts)
+
+    # Run the worker
+    try:
+        await worker.run()
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+    finally:
+        await worker.close()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
