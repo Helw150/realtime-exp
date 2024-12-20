@@ -1,8 +1,9 @@
+# diva.py
 import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, ClassVar, Optional
 
 import numpy as np
 import torch
@@ -32,17 +33,59 @@ class DiVAState:
 
 
 class DiVA:
-    def __init__(self, ctx: agents.JobContext, on_response: Callable[[str], None]):
+    _instance: ClassVar[Optional["DiVA"]] = None
+    _initialized: bool = False
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(DiVA, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+
+        # Initialize model and components only once
+        self.diva_model = AutoModel.from_pretrained("WillHeld/DiVA-llama-3-v0-8b", trust_remote_code=True)
+        self.resampler = Audio(sampling_rate=16_000)
+        # Create VAD session and options
+        self.vad_session = rtc.LocalMediaEngine()
+        self.vad_opts = VADOptions(threshold=0.5)
+        self.vad = VAD(session=self.vad_session, opts=self.vad_opts)
+        self._initialized = True
+        logger.info("DiVA model initialized and loaded into memory")
+
+    def create_instance(self, ctx: agents.JobContext, on_response: Callable[[str], None]) -> "DiVAInstance":
+        """Create a new instance for a specific context while sharing the model"""
+        return DiVAInstance(
+            ctx=ctx, on_response=on_response, diva_model=self.diva_model, resampler=self.resampler, vad=self.vad
+        )
+
+
+class DiVAInstance:
+    """Instance of DiVA for a specific context, sharing the model with other instances"""
+
+    def __init__(
+        self,
+        ctx: agents.JobContext,
+        on_response: Callable[[str], None],
+        diva_model: AutoModel,
+        resampler: Audio,
+        vad: VAD,
+    ):
         self.ctx = ctx
         self.chat = rtc.ChatManager(ctx.room)
         self.on_response = on_response
 
-        # Initialize components
-        self.diva_model = AutoModel.from_pretrained("WillHeld/DiVA-llama-3-v0-8b", trust_remote_code=True)
-        self.resampler = Audio(sampling_rate=16_000)
-        self.vad = VAD(threshold=0.5)
+        # Use shared components
+        self.diva_model = diva_model
+        self.resampler = resampler
+        # Create VAD session and options
+        self.vad_session = rtc.LocalMediaEngine()
+        self.vad_opts = VADOptions(threshold=0.5)
+        self.vad = VAD(session=self.vad_session, opts=self.vad_opts)
 
-        # State
+        # Instance-specific state
         self.state = DiVAState()
         self._current_state = AgentState.LISTENING
         self._audio_buffer = []
@@ -65,7 +108,7 @@ class DiVA:
             self._update_state(AgentState.LISTENING)
 
     async def start(self):
-        """Start the DiVA agent"""
+        """Start the DiVA instance"""
         self._update_state(AgentState.LISTENING)
 
     def _handle_track(self, track: rtc.Track, publication, participant):

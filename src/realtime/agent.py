@@ -1,122 +1,105 @@
 import asyncio
 import logging
 import os
-from dataclasses import dataclass
-from typing import Callable, Optional
 
 from dotenv import load_dotenv
-from livekit import agents, rtc
-from livekit.plugins.cartesia import TTS
+from livekit import rtc
+from livekit.agents import AutoSubscribe, JobContext, JobProcess, WorkerOptions, cli, llm, metrics
+from livekit.plugins import cartesia, silero
 
 from realtime.diva import DiVA
 
-# Setup
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class TTSManager:
-    """Handles text-to-speech synthesis and audio output"""
+def prewarm(proc: JobProcess):
+    proc.userdata["vad"] = silero.VAD.load()
 
-    audio_out: rtc.AudioSource
-    tts: TTS
-    on_speaking: Optional[Callable] = None
-    on_finished: Optional[Callable] = None
 
-    @classmethod
-    def create(cls, sample_rate: int = 24000, channels: int = 1):
-        audio_out = rtc.AudioSource(sample_rate, channels)
-        tts = TTS(model_name="ee7ea9f8-c0c1-498c-9279-764d6b56d189", sample_rate=sample_rate)
-        return cls(audio_out=audio_out, tts=tts)
+async def entrypoint(ctx: JobContext):
+    # Initialize chat context
+    initial_ctx = llm.ChatContext().append(
+        role="system",
+        text=(
+            "Your name is DiVA, which stands for Distilled Voice Assistant. "
+            "You were trained with early-fusion training to merge OpenAI's Whisper and Meta AI's Llama 3 8B "
+            "to provide end-to-end voice processing. Keep responses concise and under 20 words."
+        ),
+    )
 
-    async def speak(self, text: str):
-        """Convert text to speech and output audio"""
-        if self.on_speaking:
-            self.on_speaking()
+    logger.info(f"connecting to room {ctx.room.name}")
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
-        stream = self.tts.stream()
+    # Wait for first participant
+    participant = await ctx.wait_for_participant()
+    logger.info(f"starting DiVA for participant {participant.identity}")
+
+    # Initialize TTS
+    tts = cartesia.TTS(model_name="ee7ea9f8-c0c1-498c-9279-764d6b56d189", sample_rate=24000)
+    audio_source = rtc.AudioSource(24000, 1)
+
+    # Create and publish audio track
+    track = rtc.LocalAudioTrack.create_audio_track("diva-voice", audio_source)
+    await ctx.room.local_participant.publish_track(track)
+
+    async def synthesize_speech(text: str):
+        stream = tts.stream()
         stream.push_text(text)
 
         async for event in stream:
-            # TTS stream directly provides audio data
-            await self.audio_out.capture_frame(event.data)
+            await audio_source.capture_frame(event.data)
 
         await stream.aclose()
 
-        if self.on_finished:
-            self.on_finished()
-
-
-async def setup_diva(ctx: agents.JobContext) -> tuple[DiVA, TTSManager]:
-    """Initialize DiVA and TTS components"""
-    # Create TTS manager
-    tts_manager = TTSManager.create()
-
-    # Create DiVA with TTS callback
-    diva = DiVA(ctx=ctx, on_response=lambda text: ctx.create_task(tts_manager.speak(text)))
-
-    # Connect TTS state changes to DiVA
-    tts_manager.on_speaking = lambda: diva.set_speaking(True)
-    tts_manager.on_finished = lambda: diva.set_speaking(False)
-
-    # Setup audio output
-    track = rtc.LocalAudioTrack.create_audio_track("diva-mic", tts_manager.audio_out)
-    await ctx.room.local_participant.publish_track(track)
-
-    return diva, tts_manager
-
-
-async def run_diva(ctx: agents.JobContext):
-    """Run DiVA agent with TTS"""
-    try:
-        diva, _ = await setup_diva(ctx)
-        await diva.start()
-        await ctx.wait_for_disconnect()
-    except Exception as e:
-        logger.error(f"Error in DiVA agent: {e}")
-
-
-async def handle_job_request(job_request: agents.JobRequest):
-    """Handle incoming job requests"""
-    logger.info("Accepting job request")
-    await job_request.accept(
-        run_diva,
-        identity="diva_agent",
-        name="DiVA",
-        auto_subscribe=agents.AutoSubscribe.AUDIO_ONLY,
+    # Initialize DiVA
+    diva = DiVA(
+        ctx=ctx, vad=ctx.proc.userdata["vad"], on_response=lambda text: ctx.create_task(synthesize_speech(text))
     )
 
+    # Start DiVA
+    await diva.start()
 
-async def main():
-    """Main entry point"""
-    # Get credentials from environment variables
-    api_key = os.getenv("LIVEKIT_API_KEY")
-    ws_url = os.getenv("LIVEKIT_URL")
-    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    # Set up metrics collection
+    usage_collector = metrics.UsageCollector()
 
-    if not all([api_key, ws_url, api_secret]):
-        raise ValueError(
-            "LIVEKIT_API_KEY, LIVEKIT_WS_URL, and LIVEKIT_API_SECRET must be set in environment variables"
-        )
+    @diva.on("metrics_collected")
+    def _on_metrics_collected(mtrcs: metrics.AgentMetrics):
+        metrics.log_metrics(mtrcs)
+        usage_collector.collect(mtrcs)
 
-    worker_opts = agents.WorkerOptions(
-        entrypoint_fnc=handle_job_request,
-        ws_url=ws_url,
-        api_key=api_key,
-        api_secret=api_secret,
-    )
-    worker = agents.Worker(opts=worker_opts)
+    async def log_usage():
+        summary = usage_collector.get_summary()
+        logger.info(f"Usage: ${summary}")
 
-    # Run the worker
-    try:
-        await worker.run()
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-    finally:
-        await worker.close()
+    ctx.add_shutdown_callback(log_usage)
+
+    # Handle text chat
+    chat = rtc.ChatManager(ctx.room)
+
+    async def answer_from_text(txt: str):
+        response = await diva.generate_text_response(txt)
+        await chat.send_message(response)
+        await synthesize_speech(response)
+
+    @chat.on("message_received")
+    def on_chat_received(msg: rtc.ChatMessage):
+        if msg.message:
+            asyncio.create_task(answer_from_text(msg.message))
+
+    # Initial greeting
+    await synthesize_speech("Hey, how can I help you today?")
+
+    # Wait for disconnect
+    await ctx.wait_for_disconnect()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+        ),
+    )
