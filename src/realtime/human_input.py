@@ -1,22 +1,38 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Literal
+import numpy as np
+from typing import Literal, Generator
 
 from livekit import rtc
 
-from .. import stt as speech_to_text
-from .. import transcription, utils
-from .. import vad as voice_activity_detection
-from .log import logger
+from livekit.agents.pipeline import transcription, utils, vad as voice_activity_detection
+from realtime.log import logger
 
 EventTypes = Literal[
     "start_of_speech",
     "vad_inference_done",
     "end_of_speech",
-    "final_transcript",
-    "interim_transcript",
+    "final_response",
+    "interim_response",
 ]
+
+
+class AudioBuffer:
+    def __init__(self):
+        self.buffer = []
+        self.sample_rate = 16000  # Standard sample rate
+
+    def add_frame(self, frame):
+        self.buffer.extend(frame.data)
+
+    def get_audio(self) -> np.ndarray:
+        if not self.buffer:
+            return np.array([])
+        return np.array(self.buffer, dtype=np.float32)
+
+    def clear(self):
+        self.buffer = []
 
 
 class HumanInput(utils.EventEmitter[EventTypes]):
@@ -25,24 +41,23 @@ class HumanInput(utils.EventEmitter[EventTypes]):
         *,
         room: rtc.Room,
         vad: voice_activity_detection.VAD,
-        stt: speech_to_text.STT,
         participant: rtc.RemoteParticipant,
         transcription: bool,
+        model_fn: callable,  # The gen_from_model function
     ) -> None:
         super().__init__()
-        self._room, self._vad, self._stt, self._participant, self._transcription = (
-            room,
-            vad,
-            stt,
-            participant,
-            transcription,
-        )
+        self._room = room
+        self._vad = vad
+        self._participant = participant
+        self._transcription = transcription
+        self._model_fn = model_fn
         self._subscribed_track: rtc.RemoteAudioTrack | None = None
         self._recognize_atask: asyncio.Task[None] | None = None
 
         self._closed = False
         self._speaking = False
         self._speech_probability = 0.0
+        self._audio_buffer = AudioBuffer()
 
         self._room.on("track_published", self._subscribe_to_microphone)
         self._room.on("track_subscribed", self._subscribe_to_microphone)
@@ -95,16 +110,13 @@ class HumanInput(utils.EventEmitter[EventTypes]):
     async def _recognize_task(self, audio_stream: rtc.AudioStream) -> None:
         """
         Receive the frames from the user audio stream and detect voice activity.
+        When speech ends, process the complete utterance with the model.
         """
         vad_stream = self._vad.stream()
-        stt_stream = self._stt.stream()
 
-        def _before_forward(
-            fwd: transcription.STTSegmentsForwarder, transcription: rtc.Transcription
-        ):
+        def _before_forward(fwd: transcription.STTSegmentsForwarder, transcription: rtc.Transcription):
             if not self._transcription:
                 transcription.segments = []
-
             return transcription
 
         stt_forwarder = transcription.STTSegmentsForwarder(
@@ -115,15 +127,16 @@ class HumanInput(utils.EventEmitter[EventTypes]):
         )
 
         async def _audio_stream_co() -> None:
-            # forward the audio stream to the VAD and STT streams
             async for ev in audio_stream:
-                stt_stream.push_frame(ev.frame)
                 vad_stream.push_frame(ev.frame)
+                if self._speaking:
+                    self._audio_buffer.add_frame(ev.frame)
 
         async def _vad_stream_co() -> None:
             async for ev in vad_stream:
                 if ev.type == voice_activity_detection.VADEventType.START_OF_SPEECH:
                     self._speaking = True
+                    self._audio_buffer.clear()  # Clear buffer for new utterance
                     self.emit("start_of_speech", ev)
                 elif ev.type == voice_activity_detection.VADEventType.INFERENCE_DONE:
                     self._speech_probability = ev.probability
@@ -132,25 +145,60 @@ class HumanInput(utils.EventEmitter[EventTypes]):
                     self._speaking = False
                     self.emit("end_of_speech", ev)
 
-        async def _stt_stream_co() -> None:
-            async for ev in stt_stream:
-                stt_forwarder.update(ev)
+                    # Process the complete utterance
+                    audio_data = self._audio_buffer.get_audio()
+                    if len(audio_data) > 0:
+                        # Run the model in a separate thread to avoid blocking
+                        loop = asyncio.get_event_loop()
+                        generator = await loop.run_in_executor(None, self._model_fn, audio_data)
 
-                if ev.type == speech_to_text.SpeechEventType.FINAL_TRANSCRIPT:
-                    self.emit("final_transcript", ev)
-                elif ev.type == speech_to_text.SpeechEventType.INTERIM_TRANSCRIPT:
-                    self.emit("interim_transcript", ev)
+                        # Process the generator results
+                        accumulated_text = ""
+                        for text in generator:
+                            if text:
+                                accumulated_text += text
+                                # Emit interim results
+                                self.emit(
+                                    "interim_response",
+                                    type(
+                                        "SpeechEvent",
+                                        (),
+                                        {
+                                            "type": "interim_response",
+                                            "alternatives": [
+                                                type(
+                                                    "Alternative",
+                                                    (),
+                                                    {"text": accumulated_text, "language": "en"},  # Default to English
+                                                )
+                                            ],
+                                        },
+                                    ),
+                                )
+
+                        # Emit final transcript
+                        if accumulated_text:
+                            self.emit(
+                                "final_transcript",
+                                type(
+                                    "SpeechEvent",
+                                    (),
+                                    {
+                                        "type": "final_response",
+                                        "alternatives": [
+                                            type("Alternative", (), {"text": accumulated_text, "language": "en"})
+                                        ],
+                                    },
+                                ),
+                            )
 
         tasks = [
             asyncio.create_task(_audio_stream_co()),
             asyncio.create_task(_vad_stream_co()),
-            asyncio.create_task(_stt_stream_co()),
         ]
         try:
             await asyncio.gather(*tasks)
         finally:
             await utils.aio.gracefully_cancel(*tasks)
-
             await stt_forwarder.aclose()
-            await stt_stream.aclose()
             await vad_stream.aclose()
