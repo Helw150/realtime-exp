@@ -24,6 +24,7 @@ dependencies = [
     "livekit-api",
     "livekit-agents>=0.4.0",
     "livekit-plugins-cartesia",
+    "livekit-plugins-silero",
     "python-dotenv",
 ]
 
@@ -32,7 +33,7 @@ include = ["src/"]
 dev-mode-dirs = [".", "src"]
 
 [tool.hatch.build.sources]
-"src/realtime" = "realtime-diva"
+"realtime-diva" = "src/realtime"
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -41,7 +42,7 @@ allow-direct-references = true
 only-include = ["src"]
 
 [tool.hatch.build.targets.wheel]
-only-include = ["realtime"]
+only-include = ["src/realtime"]
 
 [tool.hatch.version]
 [project.urls]
