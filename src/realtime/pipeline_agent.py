@@ -13,33 +13,12 @@ from .. import metrics, tokenize, tts, utils, vad
 from ..types import ATTRIBUTE_AGENT_STATE, AgentState
 from .agent_output import AgentOutput, SpeechSource, SynthesisHandle
 from .agent_playout import AgentPlayout
-from .human_input import HumanInput
+from .human_input import HumanInput, ChatMessage, ChatContext
 from .log import logger
 from .plotter import AssistantPlotter
 from .speech_handle import SpeechHandle
 
 SpeechDataContextVar = contextvars.ContextVar[SpeechData]("voice_assistant_speech_data")
-
-
-@dataclass
-class ChatMessage:
-    text: str
-    role: Literal["user", "assistant"]
-
-    @staticmethod
-    def create(text: str, role: Literal["user", "assistant"]) -> "ChatMessage":
-        return ChatMessage(text=text, role=role)
-
-
-class ChatContext:
-    def __init__(self):
-        self.messages: List[ChatMessage] = []
-
-    def copy(self) -> "ChatContext":
-        new_ctx = ChatContext()
-        new_ctx.messages = self.messages.copy()
-        return new_ctx
-
 
 EventTypes = Literal[
     "user_started_speaking",

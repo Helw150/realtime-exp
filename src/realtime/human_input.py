@@ -18,9 +18,29 @@ EventTypes = Literal[
 ]
 
 
+@dataclass
+class ChatMessage:
+    text: str
+    role: Literal["user", "assistant"]
+
+    @staticmethod
+    def create(text: str, role: Literal["user", "assistant"]) -> "ChatMessage":
+        return ChatMessage(text=text, role=role)
+
+
+class ChatContext:
+    def __init__(self):
+        self.messages: List[ChatMessage] = []
+
+    def copy(self) -> "ChatContext":
+        new_ctx = ChatContext()
+        new_ctx.messages = self.messages.copy()
+        return new_ctx
+
+
 class AudioBuffer:
-    def __init__(self, max_seconds: float = 30.0):
-        self.sample_rate = 16000  # 16kHz sampling
+    def __init__(self, max_seconds: float = 30.0, sample_rate: int = 16000):
+        self.sample_rate = sample_rate
         self.max_samples = int(max_seconds * self.sample_rate)
         self.buffer = np.zeros(self.max_samples, dtype=np.float32)
         self.current_size = 0
@@ -58,13 +78,14 @@ class AudioBuffer:
 async def process_model_output(
     model_fn: Callable[[np.ndarray, List[ChatMessage]], AsyncIterable[str]],
     audio_data: np.ndarray,
+    chat_ctx: ChatContext,
     emit_fn: Callable,
     timeout: float = 30.0,
 ) -> None:
     """Process model output with timeout and error handling"""
     try:
         accumulated_text = ""
-        async for text in model_fn(audio_data, self._chat_ctx.messages):
+        async for text in model_fn(audio_data, chat_ctx.messages):
             if text:
                 accumulated_text += text
                 # Emit interim results
@@ -212,7 +233,7 @@ class HumanInput(utils.EventEmitter[EventTypes]):
                     # Process the complete utterance
                     audio_data = self._audio_buffer.get_audio()
                     if len(audio_data) > 0:
-                        await process_model_output(self._model_fn, audio_data, self.emit)
+                        await process_model_output(self._model_fn, audio_data, self._chat_ctx, self.emit)
 
         tasks = [
             asyncio.create_task(_audio_stream_co()),
