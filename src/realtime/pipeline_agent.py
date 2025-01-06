@@ -18,7 +18,12 @@ from .log import logger
 from .plotter import AssistantPlotter
 from .speech_handle import SpeechHandle
 
-SpeechDataContextVar = contextvars.ContextVar[SpeechData]("voice_assistant_speech_data")
+
+@dataclass
+class SpeechData:
+    """Data class for tracking speech-related metadata"""
+
+    sequence_id: str
 
 
 @dataclass
@@ -40,6 +45,8 @@ class ChatContext:
         new_ctx.messages = self.messages.copy()
         return new_ctx
 
+
+SpeechDataContextVar = contextvars.ContextVar[SpeechData]("voice_assistant_speech_data")
 
 EventTypes = Literal[
     "user_started_speaking",
@@ -253,7 +260,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
 
     async def say(
         self,
-        source: str | LLMStream | AsyncIterable[str],
+        source: str | AsyncIterable[str],
         *,
         allow_interruptions: bool = True,
         add_to_chat_ctx: bool = True,
@@ -263,7 +270,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
 
         Args:
             source: The source of the speech to play.
-                It can be a string, an LLMStream, or an asynchronous iterable of strings.
+                It can be a string or an asynchronous iterable of strings.
             allow_interruptions: Whether to allow interruptions during the speech playback.
             add_to_chat_ctx: Whether to add the speech to the chat context.
 
@@ -282,9 +289,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                 # no active call context, ignore
                 pass
             else:
-                if isinstance(source, LLMStream):
-                    logger.warning("LLMStream will be ignored for function call chat context")
-                elif isinstance(source, AsyncIterable):
+                if isinstance(source, AsyncIterable):
                     source, fnc_source = utils.aio.itertools.tee(source, 2)  # type: ignore
                 else:
                     fnc_source = source

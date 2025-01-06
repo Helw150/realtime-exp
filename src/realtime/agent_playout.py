@@ -104,16 +104,12 @@ class AgentPlayout(utils.EventEmitter[EventTypes]):
             playout_source=playout_source,
             transcription_fwd=transcription_fwd,
         )
-        self._playout_atask = asyncio.create_task(
-            self._playout_task(self._playout_atask, handle)
-        )
+        self._playout_atask = asyncio.create_task(self._playout_task(self._playout_atask, handle))
 
         return handle
 
     @utils.log_exceptions(logger=logger)
-    async def _playout_task(
-        self, old_task: asyncio.Task[None] | None, handle: PlayoutHandle
-    ) -> None:
+    async def _playout_task(self, old_task: asyncio.Task[None] | None, handle: PlayoutHandle) -> None:
         if old_task is not None:
             await utils.aio.gracefully_cancel(old_task)
 
@@ -159,9 +155,7 @@ class AgentPlayout(utils.EventEmitter[EventTypes]):
         finally:
             await utils.aio.gracefully_cancel(capture_task)
 
-            handle._total_played_time = (
-                handle._pushed_duration - self._audio_source.queued_duration
-            )
+            handle._total_played_time = handle._pushed_duration - self._audio_source.queued_duration
 
             if handle.interrupted or capture_task.exception():
                 self._audio_source.clear_queue()  # make sure to remove any queued frames

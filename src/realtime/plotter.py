@@ -66,9 +66,7 @@ def _draw_plot(mp_cch):
         import matplotlib as mpl  # type: ignore
         import matplotlib.pyplot as plt  # type: ignore
     except ImportError:
-        raise ImportError(
-            "matplotlib is required to run use the VoiceAssistant plotter"
-        )
+        raise ImportError("matplotlib is required to run use the VoiceAssistant plotter")
 
     plt.style.use("ggplot")
     mpl.rcParams["toolbar"] = "None"
