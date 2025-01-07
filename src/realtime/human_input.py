@@ -6,14 +6,14 @@ from typing import Literal, Callable
 
 from livekit import rtc
 
-from livekit.agents.pipeline import transcription, utils, vad as voice_activity_detection
+from livekit.agents import transcription, utils, vad as voice_activity_detection
 from realtime.log import logger
+import traceback
 
 EventTypes = Literal[
     "start_of_speech",
     "vad_inference_done",
     "end_of_speech",
-    "final_response",
     "interim_response",
 ]
 
@@ -31,7 +31,6 @@ class AudioBuffer:
         Returns False if buffer would overflow, True if frame was added successfully.
         """
         frame_data = np.array(frame.data, dtype=np.float32)
-        frame_data = np.clip(frame_data, -1.0, 1.0)
 
         # Check if we have enough space
         if self.current_size + len(frame_data) > self.max_samples:
@@ -59,51 +58,36 @@ async def process_model_output(
     model_fn: Callable[[np.ndarray, List[ChatMessage]], AsyncIterable[str]],
     audio_data: np.ndarray,
     emit_fn: Callable,
+    chat_ctx: ChatContext,
     timeout: float = 30.0,
 ) -> None:
     """Process model output with timeout and error handling"""
     try:
         accumulated_text = ""
-        async for text in model_fn(audio_data, self._chat_ctx.messages):
-            if text:
-                accumulated_text += text
-                # Emit interim results
-                emit_fn(
-                    "interim_response",
-                    type(
-                        "SpeechEvent",
-                        (),
-                        {
-                            "type": "interim_response",
-                            "alternatives": [
-                                type(
-                                    "Alternative",
-                                    (),
-                                    {"text": accumulated_text, "language": "en"},
-                                )
-                            ],
-                        },
-                    ),
-                )
 
-        if accumulated_text:
-            emit_fn(
-                "final_response",
-                type(
-                    "SpeechEvent",
-                    (),
-                    {
-                        "type": "final_response",
-                        "alternatives": [type("Alternative", (), {"text": accumulated_text, "language": "en"})],
-                    },
-                ),
-            )
+        emit_fn(
+            "interim_response",
+            type(
+                "SpeechEvent",
+                (),
+                {
+                    "type": "interim_response",
+                    "alternatives": [
+                        type(
+                            "Alternative",
+                            (),
+                            {"text": model_fn(audio_data, chat_ctx.messages), "language": "en"},
+                        )
+                    ],
+                },
+            ),
+        )
 
     except asyncio.TimeoutError:
         logger.error("Model processing timed out")
         # Emit error event if needed
     except Exception as e:
-        logger.error(f"Error processing model output: {str(e)}")
+        logger.error("Error processing model output: %s", e, exc_info=True)
         # Emit error event if needed
 
 
@@ -212,7 +196,7 @@ class HumanInput(utils.EventEmitter[EventTypes]):
                     # Process the complete utterance
                     audio_data = self._audio_buffer.get_audio()
                     if len(audio_data) > 0:
-                        await process_model_output(self._model_fn, audio_data, self.emit)
+                        await process_model_output(self._model_fn, audio_data, self.emit, self._chat_ctx)
 
         tasks = [
             asyncio.create_task(_audio_stream_co()),

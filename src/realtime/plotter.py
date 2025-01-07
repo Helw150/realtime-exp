@@ -8,8 +8,8 @@ import time
 from dataclasses import dataclass
 from typing import ClassVar, Literal, Tuple
 
-from .. import utils
-from ..ipc import channel
+from livekit.agents import utils
+from livekit.agents.ipc import channel
 
 PlotType = Literal["vad_probability", "raw_vol", "smoothed_vol"]
 EventType = Literal[

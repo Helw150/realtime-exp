@@ -4,13 +4,13 @@ import asyncio
 import contextvars
 import time
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, AsyncIterable, Callable, Literal, Optional, List, Union
+from typing import Any, AsyncGenerator, AsyncIterable, Callable, Literal, Optional, List, Union, Protocol
 
 import numpy as np
 from livekit import rtc
 
-from .. import metrics, tokenize, tts, utils, vad
-from ..types import ATTRIBUTE_AGENT_STATE, AgentState
+from livekit.agents import metrics, tokenize, tts, utils, vad
+from livekit.agents.types import ATTRIBUTE_AGENT_STATE, AgentState
 from .agent_output import AgentOutput, SpeechSource, SynthesisHandle
 from .agent_playout import AgentPlayout
 from .human_input import HumanInput
@@ -28,12 +28,16 @@ class SpeechData:
 
 @dataclass
 class ChatMessage:
-    text: str
     role: Literal["user", "assistant"]
+    text: Optional[str] = None
+    audio: Optional[np.array] = None
 
     @staticmethod
-    def create(text: str, role: Literal["user", "assistant"]) -> "ChatMessage":
-        return ChatMessage(text=text, role=role)
+    def create(
+        role: Literal["user", "assistant"], text: Optional[str] = None, audio: Optional[np.array] = None
+    ) -> "ChatMessage":
+        assert text is None or audio is None
+        return ChatMessage(text=text, audio=audio, role=role)
 
 
 class ChatContext:
@@ -280,19 +284,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         """
         await self._track_published_fut
 
-        call_ctx = None
         fnc_source: str | AsyncIterable[str] | None = None
-        if add_to_chat_ctx:
-            try:
-                call_ctx = AgentCallContext.get_current()
-            except LookupError:
-                # no active call context, ignore
-                pass
-            else:
-                if isinstance(source, AsyncIterable):
-                    source, fnc_source = utils.aio.itertools.tee(source, 2)  # type: ignore
-                else:
-                    fnc_source = source
 
         new_handle = SpeechHandle.create_assistant_speech(
             allow_interruptions=allow_interruptions, add_to_chat_ctx=add_to_chat_ctx
@@ -304,21 +296,6 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             self._playing_speech.add_nested_speech(new_handle)
         else:
             self._add_speech_for_playout(new_handle)
-
-        # add the speech to the function call context if needed
-        if call_ctx is not None and fnc_source is not None:
-            if isinstance(fnc_source, AsyncIterable):
-                text = ""
-                async for chunk in fnc_source:
-                    text += chunk
-            else:
-                text = fnc_source
-
-            call_ctx.add_extra_chat_message(ChatMessage.create(text=text, role="assistant"))
-            logger.debug(
-                "added speech to function call chat context",
-                extra={"text": text},
-            )
 
         return new_handle
 
@@ -397,6 +374,10 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         def _on_end_of_speech(ev: vad.VADEvent) -> None:
             self._plotter.plot_event("user_stopped_speaking")
             self.emit("user_stopped_speaking")
+            # Store placeholder for user's speech
+            audio_array = np.concat([np.array(frame.data, dtype=np.float32) for frame in ev.frames])
+            user_msg = ChatMessage.create(audio=audio_array, role="user")
+            self._chat_ctx.messages.append(user_msg)
             self._deferred_validation.on_human_end_of_speech(ev)
 
         def _on_interim_response(ev) -> None:
@@ -405,35 +386,10 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                 if self._playing_speech is None or self._playing_speech.allow_interruptions:
                     self._synthesize_agent_reply()
 
-        def _on_final_response(ev) -> None:
-            response = ev.alternatives[0].text
-            if not response:
-                return
-
-            self._last_final_response_time = time.perf_counter()
-
-            # Store placeholder for user's speech
-            user_msg = ChatMessage.create(text="[PLACEHOLDER]", role="user")
-            self._chat_ctx.messages.append(user_msg)
-            self.emit("user_speech_committed", user_msg)
-
-            # Store the actual response
-            self._response_text = response
-
-            if self._playing_speech is None or self._playing_speech.allow_interruptions:
-                self._synthesize_agent_reply()
-
-            words = self._opts.transcription.word_tokenizer.tokenize(text=response)
-            if len(words) >= 3:
-                self._interrupt_if_possible()
-
-            self._deferred_validation.on_human_final_transcript(response, ev.alternatives[0].language)
-
         self._human_input.on("start_of_speech", _on_start_of_speech)
         self._human_input.on("vad_inference_done", _on_vad_inference_done)
         self._human_input.on("end_of_speech", _on_end_of_speech)
         self._human_input.on("interim_response", _on_interim_response)
-        self._human_input.on("final_response", _on_final_response)
 
     @utils.log_exceptions(logger=logger)
     async def _main_task(self) -> None:
@@ -454,6 +410,20 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             tts=self._tts,
         )
 
+        def _on_final_response(ev) -> None:
+            response = ev.alternatives[0].text
+            if not response:
+                return
+
+            self._last_final_response_time = time.perf_counter()
+
+            # Store the actual response
+            self._response_text = response
+
+            # Store agents response
+            assistant_msg = ChatMessage.create(text=response, role="assistant")
+            self._chat_ctx.messages.append(assistant_msg)
+
         def _on_playout_started() -> None:
             self._plotter.plot_event("agent_started_speaking")
             self.emit("agent_started_speaking")
@@ -466,6 +436,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
 
         agent_playout.on("playout_started", _on_playout_started)
         agent_playout.on("playout_stopped", _on_playout_stopped)
+        self._agent_output.on("final_response", _on_final_response)
 
         self._track_published_fut.set_result(None)
 

@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncIterable
 
-from .. import utils
-from ..llm import ChatMessage, LLMStream
+from livekit.agents import utils
+from livekit.agents.llm import ChatMessage
 from .agent_output import SynthesisHandle
 
 
@@ -35,7 +35,7 @@ class SpeechHandle:
         self._speech_committed = False  # speech committed (interrupted or not)
 
         # source and synthesis_handle are None until the speech is initialized
-        self._source: str | LLMStream | AsyncIterable[str] | None = None
+        self._source: str | AsyncIterable[str] | None = None
         self._synthesis_handle: SynthesisHandle | None = None
 
         # nested speech handle and function calls
@@ -99,7 +99,7 @@ class SpeechHandle:
     def initialize(
         self,
         *,
-        source: str | LLMStream | AsyncIterable[str],
+        source: str | AsyncIterable[str],
         synthesis_handle: SynthesisHandle,
     ) -> None:
         if self.interrupted:
@@ -137,7 +137,7 @@ class SpeechHandle:
         return self._add_to_chat_ctx
 
     @property
-    def source(self) -> str | LLMStream | AsyncIterable[str]:
+    def source(self) -> str | AsyncIterable[str]:
         if self._source is None:
             raise RuntimeError("speech not initialized")
         return self._source
