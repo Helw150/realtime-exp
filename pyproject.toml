@@ -26,6 +26,15 @@ dependencies = [
     "livekit-plugins-cartesia",
     "livekit-plugins-silero",
     "python-dotenv",
+    "soundfile",
+    "google-generativeai",
+    "gradio",
+    "librosa",
+    "torch",
+    "xxhash",
+    "datasets",
+    "openai",
+    "transformers"
 ]
 
 [tool.hatch.build]
