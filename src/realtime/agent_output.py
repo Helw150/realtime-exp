@@ -211,7 +211,6 @@ class AgentOutput(utils.EventEmitter[EventTypes]):
         final_response = ""
         try:
             async for resp in tts_source:
-                print(resp)
                 final_response = resp
         finally:
             return final_response
@@ -276,7 +275,7 @@ class AgentOutput(utils.EventEmitter[EventTypes]):
                     read_tts_atask = asyncio.create_task(_read_generated_audio_task(tts_stream))
 
                 tts_stream.push_text(seg)
-                tts_text = seg
+                tts_text += seg
 
             if tts_stream is not None:
                 tts_stream.end_input()
