@@ -42,30 +42,13 @@ def api_streaming(model_id):
     client = AsyncOpenAI(**_get_config_for_model_name(model_id))
     resampler = Audio(sampling_rate=16_000)
 
-    async def get_chat_response(audio_input, history):
-        if audio_input is None:
+    async def get_chat_response(history):
+        if len(history) == 0:
             raise StopAsyncIteration("")
-        sr, y = audio_input
-        x = xxhash.xxh32(bytes(y)).hexdigest()
-        y = y.astype(np.float32)
-        y /= np.max(np.abs(y))
-        a = resampler.decode_example(resampler.encode_example({"array": y, "sampling_rate": sr}))
-        sf.write(f"{x}.wav", a["array"], a["sampling_rate"], format="wav")
-        with open(f"{x}.wav", "rb") as wav_file:
-            wav_data = wav_file.read()
-        encoded_string = base64.b64encode(wav_data).decode("utf-8")
         try:
             completion = await client.chat.completions.create(
                 model=model_id,
-                messages=history
-                + [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "audio", "audio_url": "data:audio/wav;base64," + encoded_string},
-                        ],
-                    },
-                ],
+                messages=history,
                 stream=True,
                 temperature=0.0,
             )
@@ -74,7 +57,6 @@ def api_streaming(model_id):
                 if len(chunk.choices) > 0:
                     text_response.append(chunk.choices[0].delta.content)
                     yield "".join(text_response)
-            os.remove(f"{x}.wav")
         except Exception as e:
             print(e)
             print(f"error for {model_id}")

@@ -3,7 +3,9 @@ import base64
 import logging
 from collections import deque
 from typing import AsyncIterable, Iterable, List
+import os
 
+import xxhash
 import numpy as np
 import soundfile as sf
 from dotenv import load_dotenv
@@ -36,15 +38,17 @@ def prewarm(proc: JobProcess):
     # Example unified model function that combines STT and LLM
     async def unified_model_fn(audio_array: np.ndarray, chat_history: List[ChatMessage]) -> AsyncIterable[str]:
         messages = []
-        for message in chat_history[:-1]:
+        for message in chat_history:
             if message.text is not None:
                 content = [{"type": "text", "text": message.text}]
             elif message.audio is not None:
                 audio = message.audio
                 y = audio.astype(np.float32)
                 y /= np.max(np.abs(y))
-                sf.write(f"tmp.wav", y, 16000, format="wav")
-                with open(f"tmp.wav", "rb") as wav_file:
+                x = xxhash.xxh32(bytes(y)).hexdigest()
+                if not os.path.exists(f"./tmp_{x}.wav"):
+                    sf.write(f"./tmp_{x}.wav", y, 16000, format="wav")
+                with open(f"./tmp_{x}.wav", "rb") as wav_file:
                     wav_data = wav_file.read()
                 encoded_string = base64.b64encode(wav_data).decode("utf-8")
                 content = [{"type": "audio", "audio_url": "data:audio/wav;base64," + encoded_string}]
@@ -55,8 +59,9 @@ def prewarm(proc: JobProcess):
                 }
             )
         # messages = [messages[0]]  # Temporary Single Turn Override
+        messages = messages
         prev_seen = ""
-        async for resp in timed_string_accumulator(streaming_fn((16000, audio_array), messages)):
+        async for resp in timed_string_accumulator(streaming_fn(messages)):
             yield resp[len(prev_seen) :]
             prev_seen = resp
 
